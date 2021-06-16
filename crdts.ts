@@ -517,6 +517,9 @@ const integrateYjsMod3 = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -
     let oleft = findItem(doc, other.originLeft, idx_hint - 1)
     let oright = other.originRight == null ? doc.content.length : findItem(doc, other.originRight, idx_hint)
 
+    // if oright == right then oleft *must equal* left
+    assert(oright !== right || oleft === oleft);
+
     // The logic below summarizes to:
     // if (oleft < left || (oleft === left && oright === right && newItem.id[0] < o.id[0])) break
     // if (oleft === left) scanning = oright < right
@@ -549,8 +552,8 @@ const integrateYjsMod3 = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -
     // if (oright < right) then we are in the middle of a rtl span, so set `scanning = true`
     // to preserve the current `destIdx` (we need to know whether to insert before/after this rtl span)
     // the current rtl span will end in 1 of 2 ways:
-    // 1. `oright == right`: there's a direct conflict (oleft == left && oright == right), (TODO: Check
-    // if there's a case where oright == right w/o oleft == left). We resolve the conflict & break (we
+    // 1. `oright == right`: there's a direct conflict (oleft == left && oright == right),
+    // (if oright == right then oleft *must equal* left, see the invariant check). We resolve the conflict & break (we
     // should insert before this rtl span),
     // or set scanning equal to false and skip past this rtl span.
     // 2. `oright > right`: we've reached the end of the current rtl span w/o ever hitting a direct conflict
