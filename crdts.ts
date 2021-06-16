@@ -291,23 +291,82 @@ export const mergeInto = <T>(algorithm: Algorithm, dest: Doc<T>, src: Doc<T>) =>
 // This is a slight modification of yjs with a few tweaks to make some
 // of the CRDT puzzles resolve better.
 const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
+  // Ved: In this algo, each "item" has a pred & a succ elemId
+  // These notes are in the context of having these ops applied in sequence
+  // to a document:
+  //  ```
+  //  makeItem('a', ['A', 0], null, null, 0),
+  //  makeItem('a', ['A', 1], ['A', 0], null, 1),
+  //  makeItem('a', ['A', 2], ['A', 1], null, 2),
+
+  //  makeItem('b', ['B', 0], null, null, 0),
+  //  makeItem('b', ['B', 1], ['B', 0], null, 1),
+  //  makeItem('b', ['B', 2], ['B', 1], null, 2),
+  //  ```
+
+  // Ved: `id[0]` is the agent name
+  // `id[1]` is the `seq`. (*Different* from Automerge's "seq")
+  // Assert that the seq increments by 1 each time (logical meaning:
+  // we are receiving ops from the agent in order)
   const lastSeen = doc.version[newItem.id[0]] ?? -1
   if (newItem.id[1] !== lastSeen + 1) throw Error('Operations out of order')
   doc.version[newItem.id[0]] = newItem.id[1]
 
+  // Ved: This is the numerical index of the item we want to insert after
+  // (`originLeft` is the elemId, which is resilient in the face of
+  // concurrency. But we need a list index to well... update/read from the list)
+  // We are essentially translating `originLeft` to a list index
+  // In the first pass:
+  // `originLeft` == null, `left` == -1, `destIdx == 0`
   let left = findItem(doc, newItem.originLeft, idx_hint - 1)
   let destIdx = left + 1
+  // Ved: Same thing here, but with `originRight`
+  // When inserting "a"s, `right` = 0,1,2
+  // When inserting "b"s, `right` = 3,3,3
+  // b/c `newItem.originRight` is always null
   let right = newItem.originRight == null ? doc.content.length : findItem(doc, newItem.originRight, idx_hint)
   let scanning = false
 
   for (let i = destIdx; ; i++) {
-    // Inserting at the end of the document. Just insert.
+    // Ved: If scanning is false then `destIdx == i`
+    // otherwise (`scanning == true`), `i` increments but `destIdx` remains the same
+    // Why? In between `left` & `right` there might be one or more chunks/spans that were
+    // inserted concurrently. To prevent interleaving we need to insert before/after
+    // one of these chunks, but when we first start scanning a chunk we don't know whether
+    // to insert before or after (that depends on user agent comparisons??)
+    // Example: If one user types "aaa" and the other "bbb": aaabbb & bbbaaa are fine,
+    // but we don't want to insert in-between a chunk/span, e.g, ababab
     if (!scanning) destIdx = i
+    // Ved: We've reached the end of the document without hitting the rightmost elemId
+    // insert at the end of the document
+    // In `interleavingForward` in the scenario where
+    // - First: do 3 insert "a" ops from the same agent
+    // - Second: do 3 insert "b" ops from a different agent
+    // In the first phase, we'll always hit the break on this if statement
+    // on the 1st iteration of this loop b/c
+    // item #, left, destIdx, doc.content.length
+    //  0       -1     0      0 (no inserts yet)
+    //  1        0     1      1
+    //  2        1     2      2
+    // we've finished inserting 3 "a"s... now, for the "b"s this is different...
+    // for the 2nd & 3rd "b"s `left` will be the index of the last item in
+    // the doc, so we hit this cond on the 1st iter & break
     if (i === doc.content.length) break
     if (i === right) break // No ambiguity / concurrency. Insert here.
 
+    // VED: We only reach this case when inserting "b"s... 
     let other = doc.content[i]
 
+    // VED: `oleft` = pred of other, `oright` = succ of other
+    // Values table:
+    // Inserting 1st "b" (0,0..=2) for ("b" item #, loop iter #)
+    //  iter #, oleft, oright
+    //   0        -1   3
+    //   0         0   3
+    //   0         1   3
+    //  left = -1; right = 3
+    // Inserting 2nd "b"
+    //  iter #, oleft, oright
     let oleft = findItem(doc, other.originLeft, idx_hint - 1)
     let oright = other.originRight == null ? doc.content.length : findItem(doc, other.originRight, idx_hint)
 
@@ -315,20 +374,20 @@ const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1
     // if (oleft < left || (oleft === left && oright === right && newItem.id[0] < o.id[0])) break
     // if (oleft === left) scanning = oright < right
 
-    // Ok now we implement the punnet square of behaviour
     if (oleft < left) {
-      // Top row. Insert, insert, arbitrary (insert)
       break
     } else if (oleft === left) {
-      // Middle row.
       if (oright < right) {
         // This is tricky. We're looking at an item we *might* insert after - but we can't tell yet!
         scanning = true
         continue
       } else if (oright === right) {
+        // VED: We enter this case on (0,0)
         // Raw conflict. Order based on user agents.
         if (newItem.id[0] < other.id[0]) break
         else {
+          // VED: We lose the user agent tie breaker ("B" > "A"),
+          // so we will be inserted after the current span of inserts
           scanning = false
           continue
         }
@@ -337,7 +396,14 @@ const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1
         continue
       }
     } else { // oleft > left
-      // Bottom row. Arbitrary (skip), skip, skip
+      // VED: We are inside an chunk/span of inserts by another user
+      // we will keep on going forward until we reach the end of this span
+      // b/c a span of inserts (left to right) has the property that
+      // `oleft` will increment by 1 each time so the condition `oleft > left`
+      // will be true until that span finishes
+      // We enter this case on (0, 1 | 2) b/c the 1st "b" will have `left  -1"
+      // (since it's pred is the start of the doc while the "a"s will have preds
+      // that keep on increasing)
       continue
     }
   }
