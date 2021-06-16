@@ -322,7 +322,7 @@ const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1
   let destIdx = left + 1
   // Ved: Same thing here, but with `originRight`
   // When inserting "a"s, `right` = 0,1,2
-  // When inserting "b"s, `right` = 3,3,3
+  // When inserting "b"s, `right` = 3,4,5
   // b/c `newItem.originRight` is always null
   let right = newItem.originRight == null ? doc.content.length : findItem(doc, newItem.originRight, idx_hint)
   let scanning = false
@@ -365,8 +365,6 @@ const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1
     //   0         0   3
     //   0         1   3
     //  left = -1; right = 3
-    // Inserting 2nd "b"
-    //  iter #, oleft, oright
     let oleft = findItem(doc, other.originLeft, idx_hint - 1)
     let oright = other.originRight == null ? doc.content.length : findItem(doc, other.originRight, idx_hint)
 
@@ -412,6 +410,220 @@ const integrateYjsMod = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1
   doc.content.splice(destIdx, 0, newItem)
   if (!newItem.isDeleted) doc.length += 1
 }
+
+// VED: This is not used. This is a commented version of `integrateYjsMod`
+// for the case where we insert "bbb" then "aaa".
+const integrateYjsMod2 = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
+  const lastSeen = doc.version[newItem.id[0]] ?? -1
+  if (newItem.id[1] !== lastSeen + 1) throw Error('Operations out of order')
+  doc.version[newItem.id[0]] = newItem.id[1]
+
+  let left = findItem(doc, newItem.originLeft, idx_hint - 1)
+  let destIdx = left + 1
+  let right = newItem.originRight == null ? doc.content.length : findItem(doc, newItem.originRight, idx_hint)
+  let scanning = false
+
+  for (let i = destIdx; ; i++) {
+    if (!scanning) destIdx = i
+    if (i === doc.content.length) break
+    if (i === right) break
+
+    let other = doc.content[i]
+
+    // For the first "a":
+    // `left == -1`, `right = 3 (doc.content.length)`
+    // and `left == oleft && right == oright` (direct conflict)
+    let oleft = findItem(doc, other.originLeft, idx_hint - 1)
+    let oright = other.originRight == null ? doc.content.length : findItem(doc, other.originRight, idx_hint)
+
+    // The logic below summarizes to:
+    // if (oleft < left || (oleft === left && oright === right && newItem.id[0] < o.id[0])) break
+    // if (oleft === left) scanning = oright < right
+
+    if (oleft < left) {
+      // For 2nd & 3rd "a"s we fall in here. Why?
+      // 2nd "a":
+      //    ∨ i points here (1)
+      //  a b b b
+      //  ^ left points here (0)
+      // ^ oleft points here (-1)
+      // 3rd "a"
+      //      ∨ i points here (2)
+      //  a a b b b
+      // ^ oleft points here (-1)
+      //    ^ left points here (1)
+      //
+      break
+    } else if (oleft === left) {
+      if (oright < right) {
+        // This is tricky. We're looking at an item we *might* insert after - but we can't tell yet!
+        scanning = true
+        continue
+      } else if (oright === right) {
+        // For the 1st "a", we hit this case & win the tie breaker
+        // ("A" < "B")
+        if (newItem.id[0] < other.id[0]) break
+        else {
+          scanning = false
+          continue
+        }
+      } else { // oright > right
+        scanning = false
+        continue
+      }
+    } else { // oleft > left
+      continue
+    }
+  }
+
+  // We've found the position. Insert here.
+  doc.content.splice(destIdx, 0, newItem)
+  if (!newItem.isDeleted) doc.length += 1
+}
+
+// VED: This is not used. This is a commented version of `integrateYjsMod` after I worked
+// through the following cases:
+// 1. "aaa" then "bbb"
+// 2. "bbb" then "aaa"
+// 3. "aaa" (right-to-left) then "bbb" (right-to-left)
+// 4. "bbb" (right-to-left) then "aaa" (right-to-left)
+const integrateYjsMod3 = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
+  const lastSeen = doc.version[newItem.id[0]] ?? -1
+  if (newItem.id[1] !== lastSeen + 1) throw Error('Operations out of order')
+  doc.version[newItem.id[0]] = newItem.id[1]
+
+  let left = findItem(doc, newItem.originLeft, idx_hint - 1)
+  let destIdx = left + 1
+  let right = newItem.originRight == null ? doc.content.length : findItem(doc, newItem.originRight, idx_hint)
+  let scanning = false
+
+  for (let i = destIdx; ; i++) {
+    if (!scanning) destIdx = i
+    // We've hit the end of the doc, we have to insert
+    // hits:
+    // a[1-3],b[1-3] in "aaa" (ltr), "bbb" (ltr)
+    // b[1-3] in "bbb" (ltr), "aaa" (ltr). TODO(check)
+    // a1/b1 in "aaa" (rtl) "bbb" (rtl). TODO(check)
+    // not the 2nd or 3rd "a"s or "b"s b/c we are inserting them right-to-left
+    // (so not at the end of the document)
+    // b1 in "bbb" (rtl), "aaa" (rtl)
+    if (i === doc.content.length) break
+    // in "aaa" (rtl), "bbb" (rtl) we hit this case for a2/a3 and b2/b3
+    // b2/b3 & a2/a3 in "bbb" (rtl) "aaa" (rtl)
+    if (i === right) break
+
+    let other = doc.content[i]
+
+    let oleft = findItem(doc, other.originLeft, idx_hint - 1)
+    let oright = other.originRight == null ? doc.content.length : findItem(doc, other.originRight, idx_hint)
+
+    // The logic below summarizes to:
+    // if (oleft < left || (oleft === left && oright === right && newItem.id[0] < o.id[0])) break
+    // if (oleft === left) scanning = oright < right
+
+    // Deconstructing the above if statements:
+    /*
+    if (
+      // Consider the document as a tree
+      //   ROOT
+      //  |   |
+      //  a   b
+      //      b
+      //      b
+      // we've hit the end of the "a" branch and `left` (our pred) is the first "a"
+      // we've just encountered "b" (whose pred is ROOT), we want to insert at the
+      // end of our branch
+      // in array form:
+      // a b b b
+      //  | we are here
+      oleft < left 
+      // we've had a direct conflict (left & right bounds are the exact same)
+      // *and* we win the conflict (we have a higher priority agent id, i.e "A" has higher priority than "B")
+      // insert here
+      || (oleft === left && oright === right && newItem.id[0] < o.id[0]))  {
+        // insert item here
+        break
+    }
+    // This is hard b/c I believe this is only for the right-to-left case,
+    // so a tree doesn't cut it
+    // if (oright < right) then we are in the middle of a rtl span, so set `scanning = true`
+    // to preserve the current `destIdx` (we need to know whether to insert before/after this rtl span)
+    // the current rtl span will end in 1 of 2 ways:
+    // 1. `oright == right`: there's a direct conflict (oleft == left && oright == right), (TODO: Check
+    // if there's a case where oright == right w/o oleft == left). We resolve the conflict & break (we
+    // should insert before this rtl span),
+    // or set scanning equal to false and skip past this rtl span.
+    // 2. `oright > right`: we've reached the end of the current rtl span w/o ever hitting a direct conflict
+    // (we know this is the case b/c previously oright < right but now it skipped to oright > right)
+    // continue onwards to find the insertion point
+    if (oleft === left) scanning = oright < right
+    */
+
+    if (oleft < left) {
+
+      // hit: the 1st loop iteration for a2/a3 in "bbb" (ltr), "aaa" (ltr)
+      // logical meaning: We are the continuation of a ltr span, so we need to
+      // insert at the end of this ltr span but before the start of the next span
+      // (which is also ltr??)
+      break
+    } else if (oleft === left) {
+      if (oright < right) {
+        // We have encountered a rtl span / are in the middle of it
+        // but we don't know whether to insert before/after it
+        // hit: "aaa" (rtl) "bbb" (rtl)
+        // on the 1st/2nd loop iterations of b[1-3]
+        // (on the 3rd iter of b1 we go to the tie breaker,
+        // on the 3rd iter of b2/b3 we skip to `oright > right` indicating
+        // we should move past the current span)
+        // hit: "bbb" (rtl) "aaa" (rtl)
+        // on the 1st/2nd loop iterations of a1
+        // b/c `scanning = true`, we preserve `destIdx`
+        // so when we win the tie breaker, we insert before the "b"s
+        scanning = true
+        continue
+      } else if (oright === right) {
+        // hits:
+        // the first "b" in "aaa" (ltr), "bbb" (ltr)
+        // the first "a" in "bbb" (ltr), "aaa" (ltr)
+        // the first "b" in "aaa" (rtl) "bbb" (rtl)
+        // a1 in "bbb" (rtl) "aaa" (rtl)
+        if (newItem.id[0] < other.id[0]) break //CONFLICT
+        else {
+          // hits:
+          // b1 in "aaa" (ltr), "bbb" (ltr)
+          // b1 in "aaa" (rtl) "bbb" (rtl)
+          // logical meaning: we've lost the tie breaker
+          // if it was ambiguous whether we were going to insert
+          // before/after a span (scanning == true), it is no longer
+          // ambiguous, we will insert after
+          scanning = false
+          continue
+        }
+      } else { // oright > right
+        // hits:
+        // 3rd loop iteration of b2/b3 in "aaa" (rtl) "bbb" (rtl)
+        // logical meaning: we've reached the end of the rtl span,
+        // and we never reached a time where both `oleft === left && oright == right`
+        // Instead, we skipped straight to `oright > right` which means we insert *after* this rtl span
+        scanning = false
+        continue
+      }
+    } else { // oleft > left
+      // We are skipping a ltr span
+      // Example: we're the first "b" in "aaa" (ltr), "bbb" (ltr)
+      // We lose the //CONFLICT (no break), so we advance, but
+      // our left is always the beginning of the doc while
+      // the 2nd & 3rd "a" will have a left of 0, 1 respectively
+      // so b2/b3 in this case go here
+      continue
+    }
+  }
+
+  // We've found the position. Insert here.
+  doc.content.splice(destIdx, 0, newItem)
+  if (!newItem.isDeleted) doc.length += 1
+}
+
 
 const integrateYjs = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
   const lastSeen = doc.version[newItem.id[0]] ?? -1
