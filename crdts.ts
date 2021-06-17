@@ -679,42 +679,95 @@ const integrateYjs = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) =
   if (!newItem.isDeleted) doc.length += 1
 }
 
-const integrateAutomerge = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
-  const {id} = newItem
-  assert(newItem.seq >= 0)
+const integrateAutomerge = <T>(
+  doc: Doc<T>,
+  newItem: Item<T>,
+  idx_hint: number = -1
+) => {
+  const { id } = newItem;
+  assert(newItem.seq >= 0);
 
-  const lastSeen = doc.version[id[0]] ?? -1
-  if (id[1] !== lastSeen + 1) throw Error('Operations out of order')
-  doc.version[id[0]] = id[1]
+  const lastSeen = doc.version[id[0]] ?? -1;
+  if (id[1] !== lastSeen + 1) throw Error("Operations out of order");
+  doc.version[id[0]] = id[1];
 
-  let parent = findItem(doc, newItem.originLeft, idx_hint - 1)
-  let destIdx = parent + 1
+  // VED: `originLeft` = `elemId` in Automerge terminology
+  // `findItem` maps elemId to a numerical index.
+  // (We are getting the index of the predecessor/parent)
+  const parent = findItem(doc, newItem.originLeft, idx_hint - 1);
+  let destIdx = parent + 1;
 
   // Scan for the insert location. Stop if we reach the end of the document
+
+  // VED: Unlike yjsMod, the terminating condition of (we hit the end of the list)
+  // is in the for-loop bounds itself (`destIdx` < `doc.content.length`)
+  // In "aaa" "bbb", for a[0-2] we terminate w/o ever entering
+  // the loop. Same with b[1-2] (we find the parent, it will
+  // be the last item in the doc, we break from the loop)
+
+  // VED: For assertions
+  let lostConflict = false;
   for (; destIdx < doc.content.length; destIdx++) {
-    let o = doc.content[destIdx]
+    let o = doc.content[destIdx];
 
     // This is an unnecessary optimization (I couldn't help myself). It
     // doubles the speed when running the local editing traces by
     // avoiding calls to findItem() below. When newItem.seq > o.seq
     // we're guaranteed to end up falling into a branch that calls
     // break;.
-    if (newItem.seq > o.seq) break
+
+    if (newItem.seq > o.seq) {
+      // VED: Why does this optimization work?
+      // There are 3 cases below:
+      // oparent < parent (we break; the optimization works)
+      // oparent == parent (we would enter the `newItem.seq > o.seq` case & break; the optimization works)
+      // oparent > parent (this case only happens if `lostConflict == true`, but that only happens if
+      // we enter `oparent == parent` & lose a conflict, which we won't b/c our seq number is higher)
+      break;
+    }
 
     // Optimization: This call halves the speed of this automerge
     // implementation. Its only needed to see if o.originLeft has been
     // visited in this loop, which we could calculate much more
     // efficiently.
-    let oparent = findItem(doc, o.originLeft, idx_hint - 1)
+
+    // VED: Get the index of the parent of other
+    // For b[0] in "aaa" "bbb", parent = -1
+    // oparent goes -1, 0, 1
+    let oparent = findItem(doc, o.originLeft, idx_hint - 1);
 
     // All the logic below can be expressed in this single line:
     // if (oparent < parent || (oparent === parent && (newItem.seq === o.seq) && id[0] < o.id[0])) break
 
     // Ok now we implement the punnet square of behaviour
     if (oparent < parent) {
-      // We've gotten to the end of the list of children. Stop here.
-      break
+      // VED: We've gotten to the end of the list of children. Stop here.
+      // When disabling the optimization we enter this branch on the 1st loop iter of b1/b2 (remember b0 is the first "b" that is inserted)
+      // Visualization:
+      // Automerge is a tree. We're encoding the tree as a list.
+      //     ROOT
+      //   |    |
+      //   a    b
+      //        b
+      //        b
+      // We want to insert the 2nd "a"
+      // The list looks like [a b b b ]
+      // When we encounter the 1st b, we it's pred will be ROOT (and if our pred is > ROOT, this means we're at the tip of a branch,
+      // so we should insert)
+      // This works b/c `const parent = findItem(...)` will put us at the end of our child branch
+      // so, we don't need to worry about a scenario where
+      //  ROOT
+      //  |   |
+      //  a   b
+      //  a   b
+      //      b
+      // where we will start after the 1st "a" (which as pred = ROOT), even though we are the 3rd "a"
+      // and should start after the 2nd "a"
+      break;
     } else if (oparent === parent) {
+      // VED: For b[0] in "aaa" "bbb" we enter here
+      // Both items have the same parent. There's a conflict
+
       // Concurrent items from different useragents are sorted first by seq then agent.
 
       // NOTE: For consistency with the other algorithms, adjacent items
@@ -726,25 +779,40 @@ const integrateAutomerge = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number =
 
       // Inverted item sequence number comparisons are used in place of originRight for AM.
       if (newItem.seq > o.seq) {
-        break
+        // The new item has a higher seq, we win the conflict (get inserted immediately)
+        break;
       } else if (newItem.seq === o.seq) {
-        if (id[0] < o.id[0]) break
-        else continue
+        // The seqs are the same, we tie break based on agent
+        // if we win, we `break` (get inserted immediately)
+        if (id[0] < o.id[0]) break;
+        else {
+          lostConflict = true;
+          continue;
+        }
       } else {
-        continue
+        lostConflict = true;
+        continue;
       }
-    } else {
+    } else { // oparent > parent
+      // VED: This assertion shows that we only enter this branch
+      // if we *lost* a conflict & are skipping over the children in that branch
+      assert(lostConflict);
       // Skip child
-      continue
+      // VED: For b[0] in "aaa" "bbb" we first hit `oparent === parent` (hard conflict)
+      // and then enter this case twice since oparent increases while parent is constant
+      // (In reference to the original Automerge paper, we are skipping past a child
+      // branch in the tree)
+      continue;
     }
   }
 
-  if (newItem.seq > doc.maxSeq) doc.maxSeq = newItem.seq
+  if (newItem.seq > doc.maxSeq) doc.maxSeq = newItem.seq;
 
   // We've found the position. Insert here.
-  doc.content.splice(destIdx, 0, newItem)
-  if (!newItem.isDeleted) doc.length += 1
-}
+  doc.content.splice(destIdx, 0, newItem);
+  if (!newItem.isDeleted) doc.length += 1;
+};
+
 
 const integrateSync9 = <T>(doc: Doc<T>, newItem: Item<T>, idx_hint: number = -1) => {
   const {id: [agent, seq]} = newItem
